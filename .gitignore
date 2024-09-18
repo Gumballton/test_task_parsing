@@ -1,1 +1,3 @@
 venv/
+my_proxy_project/my_proxy_project/__pycache__
+my_proxy_project/my_proxy_project/spiders/__pycache__
