@@ -19,6 +19,12 @@ NEWSPIDER_MODULE = "my_proxy_project.spiders"
 # Obey robots.txt rules
 ROBOTSTXT_OBEY = True
 
+DOWNLOAD_DELAY = 2  # Delay between requests
+AUTOTHROTTLE_ENABLED = True
+AUTOTHROTTLE_START_DELAY = 5
+AUTOTHROTTLE_MAX_DELAY = 60
+AUTOTHROTTLE_TARGET_CONCURRENCY = 1.0
+
 # Configure maximum concurrent requests performed by Scrapy (default: 16)
 #CONCURRENT_REQUESTS = 32
 
