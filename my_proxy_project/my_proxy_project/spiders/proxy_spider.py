@@ -1,39 +1,26 @@
 import argparse
+import random
 import scrapy
 import json
 import time
 
 class ProxySpider(scrapy.Spider):
-    """
-    Spider for collecting proxies from freeproxy.world and sending them to a specified server.
-
-    Attributes:
-        user_id (str): User ID for sending proxies.
-        proxies (list): List of collected proxies.
-        current_page (int): Current page of proxies.
-        total_pages (int): Total number of pages to scrape.
-        start_time (float): Start time of the spider execution.
-    """
     name = "proxy_spider"
 
     def __init__(self, user_id, *args, **kwargs):
-        """
-        Initialize the spider.
-
-        Args:
-            user_id (str): User ID for sending proxies.
-        """
+        """Initialize the spider with the user ID and other parameters."""
         super().__init__(*args, **kwargs)
         self.user_id = user_id
         self.proxies = []
         self.current_page = 1
         self.total_pages = 5
         self.start_time = time.time()
+        self.index = 0
+        self.results = {}
+        self.base_delay = 15  # Base delay between requests
 
     def start_requests(self):
-        """
-        Starts the request to get the token.
-        """
+        """Start the requests to get the initial token."""
         yield scrapy.Request(
             url='https://test-rg8.ddns.net/api/get_token',
             callback=self.parse_token,
@@ -41,12 +28,7 @@ class ProxySpider(scrapy.Spider):
         )
 
     def parse_token(self, response):
-        """
-        Processes the response from the token request.
-
-        Args:
-            response (scrapy.http.Response): The server response.
-        """
+        """Parse the token from the response headers."""
         form_token = response.headers.getlist('Set-Cookie')
         token_value = None
 
@@ -64,27 +46,17 @@ class ProxySpider(scrapy.Spider):
         return self.fetch_proxies(token_value)
 
     def fetch_proxies(self, form_token):
-        """
-        Requests the proxy page.
-
-        Args:
-            form_token (str): The form token for the request.
-        """
+        """Fetch proxies from the proxy list pages."""
         if self.current_page <= self.total_pages:
             next_page = f'https://www.freeproxy.world/?type=&anonymity=&country=&speed=&port=&page={self.current_page}'
             self.logger.info("Requesting proxy page: %s", next_page)
             return scrapy.Request(url=next_page, callback=self.extract_proxies, meta={'form_token': form_token})
         else:
             self.logger.info("Proxy collection completed. Sending proxies...")
-            return self.post_proxies(form_token)
+            return self.send_proxies()
 
     def extract_proxies(self, response):
-        """
-        Extracts proxies from the page.
-
-        Args:
-            response (scrapy.http.Response): The server response with proxies.
-        """
+        """Extract proxies from the response."""
         self.logger.info("Calling extract_proxies.")
         rows = response.css('table.layui-table tbody tr')
 
@@ -101,96 +73,105 @@ class ProxySpider(scrapy.Spider):
         self.current_page += 1
         return self.fetch_proxies(response.meta['form_token'])
 
-    def post_proxies(self, form_token):
-        """
-        Sends the collected proxies to the server.
+    def send_proxies(self):
+        """Send the collected proxies to the server."""
+        if self.index < len(self.proxies):
+            return scrapy.Request(
+                url='https://test-rg8.ddns.net/api/get_token',
+                callback=self.get_new_token,
+                meta={'proxy_group': self.proxies[self.index:self.index + 10]},
+                dont_filter=True
+            )
+        else:
+            self.logger.info("All proxies sent.")
+            self.save_results()
+            return None
 
-        Args:
-            form_token (str): The form token for the request.
-        """
-        if not self.proxies:
-            self.logger.error("No collected proxies to send.")
+    def get_new_token(self, response):
+        """Get a new token and send a group of proxies."""
+        form_token = response.headers.getlist('Set-Cookie')
+        token_value = None
+
+        for cookie in form_token:
+            if b'form_token=' in cookie:
+                token_value = cookie.split(b'=')[1].split(b';')[0].decode('utf-8')
+                self.logger.info(f'Received new form_token: {token_value}')
+                break
+
+        if token_value is None:
+            self.logger.error('form_token not found in response headers')
             return
 
+        group = response.meta['proxy_group']
         json_data = {
             "user_id": self.user_id,
-            "len": len(self.proxies[:10]),
-            "proxies": ", ".join(self.proxies[:10])
+            "len": len(group),
+            "proxies": ", ".join(group)
         }
-
         self.logger.info("Data being sent: %s", json.dumps(json_data, indent=4))
 
         headers = {
-            'User-Agent': 'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:130.0) Gecko/20100101 Firefox/130.0',
-            'Accept': '*/*',
             'Content-Type': 'application/json',
-            'Origin': 'https://test-rg8.ddns.net',
-            'Referer': 'https://test-rg8.ddns.net/task',
-            'Connection': 'keep-alive',
-            'Cookie': f'form_token={form_token}',
-            'X-Requested-With': 'XMLHttpRequest'
+            'X-Requested-With': 'XMLHttpRequest',
+            'Cookie': f'form_token={token_value}'
         }
+
+        delay = self.base_delay + random.uniform(0, 10)
+        time.sleep(delay)
 
         return scrapy.Request(
             url='https://test-rg8.ddns.net/api/post_proxies',
             method='POST',
             headers=headers,
             body=json.dumps(json_data),
-            callback=self.parse_response
+            callback=self.parse_response,
+            meta={'group': group, 'retry_count': 0}
         )
 
     def parse_response(self, response):
-        """
-        Processes the response from the POST request.
-
-        Args:
-            response (scrapy.http.Response): The server response.
-        """
+        """Parse the response from the POST request."""
         self.logger.info('Response from POST request: %s', response.text)
+        retry_count = response.meta.get('retry_count', 0)
+
         if response.status == 200:
-            self.logger.info('Proxies successfully sent.')
-            self.save_proxies()
+            save_id = response.json().get('save_id')
+            self.logger.info('Received save_id: %s', save_id)
+            self.results[f"{save_id}_{self.index // 10 + 1}"] = response.meta['group']
+            self.index += 10
+            self.save_results() 
+            return self.send_proxies()
+        elif response.status == 429:
+            self.logger.error(f'Rate limit hit (429). Retrying in 20 seconds...')
+            time.sleep(20)
+            return self.get_new_token(response)
         else:
             self.logger.error(f'Failed to send proxies: {response.status} - {response.text}')
+            if retry_count < 3:
+                self.logger.info("Retrying in 5 seconds...")
+                time.sleep(5)
+                retry_count += 1
+                return self.send_proxies()
+            else:
+                self.index += 10
+                return self.send_proxies()
+    
+    def save_results(self):
+        """Save the collected results to a JSON file."""
+        with open('results.json', 'w') as f:
+            json.dump(self.results, f, indent=4)
+        self.logger.info("Results saved to results.json")
 
-    def save_proxies(self):
-        """
-        Saves the collected proxies to a JSON file.
-        """
-        try:
-            results = {}
-            # Load existing data if the file already exists
-            try:
-                with open('results.json', 'r') as f:
-                    results = json.load(f)
-            except FileNotFoundError:
-                pass
-
-            # Create groups of proxies, each containing up to 50 proxies
-            num_proxies = len(self.proxies)
-            groups = [self.proxies[i:i + 50] for i in range(0, num_proxies, 50)]
-
-            # Save each group under a new save_id
-            for idx, group in enumerate(groups):
-                save_id = f"save_id_{idx + 1}"
-                results[save_id] = group
-
-            # Save to the JSON file
-            with open('results.json', 'w') as f:
-                json.dump(results, f, indent=4)
-            self.logger.info(f'Proxies saved to results.json with IDs: {list(results.keys())}')
-        except Exception as e:
-            self.logger.error(f'Error saving proxies: {e}')
-
-    def close(self):
-        """
-        Called when the spider is closed.
-        """
+    def close(self, reason):
+        """Handle closing the spider and log the execution time."""
         execution_time = time.time() - self.start_time
-        formatted_time = time.strftime('%H:%M:%S', time.gmtime(execution_time))
-        with open('time.txt', 'w') as f:
-            f.write(formatted_time)
+        hours, remainder = divmod(execution_time, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        formatted_time = f"{int(hours):02}:{int(minutes):02}:{int(seconds):02}"
         self.logger.info("Execution time: %s", formatted_time)
+
+        # Save execution time to time.txt
+        with open('time.txt', 'w') as time_file:
+            time_file.write(f"{formatted_time}\n")
 
 # To launch the spider with command line arguments
 if __name__ == "__main__":
